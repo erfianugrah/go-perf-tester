@@ -8,7 +8,8 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net" // Required for custom dialer in Transport
+	"math" // Added for math.Floor
+	"net"  // Required for custom dialer in Transport
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -24,13 +25,13 @@ import (
 type TimingOutput struct {
 	RequestID int `json:"request_id"`
 
-	DNSLookupDurationMs    float64 `json:"dns_lookup_duration_ms,omitempty"`
-	TCPConnectDurationMs   float64 `json:"tcp_connect_duration_ms,omitempty"`
+	DNSLookupDurationMs   float64 `json:"dns_lookup_duration_ms,omitempty"`
+	TCPConnectDurationMs  float64 `json:"tcp_connect_duration_ms,omitempty"`
 	TLSHandshakeDurationMs float64 `json:"tls_handshake_duration_ms,omitempty"`
-	ServerProcessingMs     float64 `json:"server_processing_ms,omitempty"` // Time from WroteRequest to GotFirstResponseByte
-	ContentTransferMs      float64 `json:"content_transfer_ms,omitempty"`  // Time from GotFirstResponseByte to end of body read (approx)
-
-	OverallTotalMs float64 `json:"overall_total_ms"`
+	ServerProcessingMs    float64 `json:"server_processing_ms,omitempty"`    // Time from WroteRequest to GotFirstResponseByte
+	ContentTransferMs     float64 `json:"content_transfer_ms,omitempty"`     // Time from GotFirstResponseByte to end of body read (approx)
+	
+	OverallTotalMs   float64 `json:"overall_total_ms"`
 
 	HTTPStatus    int    `json:"http_code"`
 	EffectiveURL  string `json:"url_effective"`
@@ -73,8 +74,8 @@ func fatalf(format string, v ...interface{}) {
 }
 
 func main() {
-	log.SetOutput(os.Stderr)
-	log.SetFlags(0)
+	log.SetOutput(os.Stderr) 
+	log.SetFlags(0)        
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "gocurlt - Go HTTP Timing Tool\n\n")
@@ -95,54 +96,54 @@ func main() {
 
 	if flag.NArg() < 1 {
 		fmt.Fprintf(os.Stderr, "Error: URL is required.\n\n")
-		flag.Usage()
-		os.Exit(1)
+		flag.Usage() 
+		os.Exit(1)  
 	}
 	targetURLStr = flag.Arg(0)
 	if _, err := url.ParseRequestURI(targetURLStr); err != nil {
-		fatalf("Invalid URL: %v", err)
+		fatalf("Invalid URL: %v", err) 
 	}
 
 	summaryEnabled := !*noSummaryFlag
-
+	
 	rootCtx, rootCancel := context.WithCancel(context.Background())
-	defer rootCancel()
+	defer rootCancel() 
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-
+	
 	workerCtx, workerCancel := context.WithCancel(rootCtx)
 	defer workerCancel()
 
-	// Determine actual concurrency for transport settings
 	effectiveConcurrency := *concurrencyFlag
 	if effectiveConcurrency <= 0 {
-		effectiveConcurrency = 1
+	    effectiveConcurrency = 1
 	}
-	// transportConcurrencySetting is used for MaxIdleConnsPerHost.
-	// It shouldn't exceed the number of requests if n is small.
-	transportConcurrencySetting := effectiveConcurrency
-	if *requestsFlag > 0 && *requestsFlag < effectiveConcurrency {
-		transportConcurrencySetting = *requestsFlag
-	}
+    transportConcurrencySetting := effectiveConcurrency
+    if *requestsFlag > 0 && *requestsFlag < effectiveConcurrency {
+        transportConcurrencySetting = *requestsFlag
+    }
+    if transportConcurrencySetting == 0 { // if requestsFlag was 0 or effectiveConcurrency was 0
+        transportConcurrencySetting = 1
+    }
+
 
 	sharedClient := &http.Client{
 		CheckRedirect: func(r *http.Request, via []*http.Request) error {
-			return nil
+			return nil 
 		},
 		Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second, // Connection timeout
-				KeepAlive: 30 * time.Second, // Keep-alive period
+				Timeout:   30 * time.Second, 
+				KeepAlive: 30 * time.Second, 
 			}).DialContext,
 			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          transportConcurrencySetting + 20, // Total idle connections in the pool
-			MaxIdleConnsPerHost:   transportConcurrencySetting,      // Max idle connections to keep for a single host
-			IdleConnTimeout:       90 * time.Second,                 // How long an idle connection is kept
-			TLSHandshakeTimeout:   10 * time.Second,                 // TLS handshake timeout
+			MaxIdleConns:          transportConcurrencySetting + 20, 
+			MaxIdleConnsPerHost:   transportConcurrencySetting,    
+			IdleConnTimeout:       90 * time.Second,           
+			TLSHandshakeTimeout:   10 * time.Second,           
 			ExpectContinueTimeout: 1 * time.Second,
-			// MaxConnsPerHost: transportConcurrencySetting, // Max active connections to a single host; 0 means unlimited
 		},
 	}
 
@@ -151,24 +152,22 @@ func main() {
 	if *requestsFlag > 0 && *requestsFlag < jobBufferSize {
 		jobBufferSize = *requestsFlag
 	}
-	if jobBufferSize == 0 {
-		jobBufferSize = 1
-	}
+	if jobBufferSize == 0 { jobBufferSize = 1} 
 
-	jobs := make(chan int, jobBufferSize)
-	resultsChan := make(chan TimingOutput, *requestsFlag)
-
-	allRequestOutputs := make([]TimingOutput, 0, *requestsFlag)
-	collectedStats := make([]requestStat, 0, *requestsFlag)
-	var outputsMutex sync.Mutex
+	jobs := make(chan int, jobBufferSize) 
+	resultsChan := make(chan TimingOutput, *requestsFlag) 
+	
+	allRequestOutputs := make([]TimingOutput, 0, *requestsFlag) 
+	collectedStats := make([]requestStat, 0, *requestsFlag)    
+	var outputsMutex sync.Mutex 
 
 	numWorkersToLaunch := effectiveConcurrency
 	if *requestsFlag > 0 && *requestsFlag < numWorkersToLaunch {
 		numWorkersToLaunch = *requestsFlag
 	}
-	if numWorkersToLaunch == 0 && *requestsFlag > 0 {
-		numWorkersToLaunch = 1
-	}
+    if numWorkersToLaunch == 0 && *requestsFlag > 0 { 
+        numWorkersToLaunch = 1
+    }
 
 	for i := 0; i < numWorkersToLaunch; i++ {
 		wg.Add(1)
@@ -181,7 +180,7 @@ func main() {
 		defer collectorWg.Done()
 		for result := range resultsChan {
 			outputsMutex.Lock()
-			allRequestOutputs = append(allRequestOutputs, result)
+			allRequestOutputs = append(allRequestOutputs, result) 
 			if summaryEnabled {
 				collectedStats = append(collectedStats, requestStat{
 					OverallTotalMs: result.OverallTotalMs,
@@ -197,14 +196,14 @@ func main() {
 		for i := 1; i <= *requestsFlag; i++ {
 			select {
 			case jobs <- i:
-			case <-workerCtx.Done():
+			case <-workerCtx.Done(): 
 				logf("Context cancelled, stopping job dispatch.")
 				goto endJobLoop
 			}
 		}
 	}
 endJobLoop:
-	close(jobs)
+	close(jobs) 
 
 	allWorkersDone := make(chan struct{})
 	go func() {
@@ -217,35 +216,35 @@ endJobLoop:
 		logf("All workers finished processing jobs.")
 	case sig := <-sigs:
 		logf("Signal %v received. Cancelling pending work...", sig)
-		workerCancel()
+		workerCancel() 
 		select {
 		case <-allWorkersDone:
 			logf("All workers finished after cancellation signal.")
-		case <-time.After(5 * time.Second):
+		case <-time.After(5 * time.Second): 
 			logToStderr("Timeout waiting for workers to finish after cancellation.")
 		}
 	}
 
-	close(resultsChan)
-	collectorWg.Wait()
+	close(resultsChan) 
+	collectorWg.Wait() 
 
-	outputsMutex.Lock()
+	outputsMutex.Lock() 
 	if len(allRequestOutputs) > 0 {
-		finalJSONBytes, err := json.Marshal(allRequestOutputs)
+		finalJSONBytes, err := json.Marshal(allRequestOutputs) 
 		if err != nil {
 			logToStderr("Error marshaling final JSON array: %v", err)
 		} else {
 			fmt.Println(string(finalJSONBytes))
 		}
 	} else {
-		// If no requests were made (e.g. -n 0), or all failed before collection
-		fmt.Println("[]")
+		fmt.Println("[]") 
 	}
-
+	
 	if summaryEnabled {
-		printSummary(collectedStats)
+		printSummary(collectedStats) 
 	}
 	outputsMutex.Unlock()
+
 
 	if workerCtx.Err() == context.Canceled {
 		outputsMutex.Lock()
@@ -254,7 +253,7 @@ endJobLoop:
 		if *requestsFlag > 0 && numCollected < *requestsFlag {
 			logf("Summary and JSON output based on %d processed results out of %d intended requests due to cancellation.", numCollected, *requestsFlag)
 		}
-	}
+    }
 }
 
 func worker(ctx context.Context, workerID int, wg *sync.WaitGroup, jobs <-chan int, results chan<- TimingOutput, urlStr string, client *http.Client) {
@@ -263,7 +262,7 @@ func worker(ctx context.Context, workerID int, wg *sync.WaitGroup, jobs <-chan i
 	for {
 		select {
 		case jobID, ok := <-jobs:
-			if !ok {
+			if !ok { 
 				logf("Worker %d: jobs channel closed, exiting.", workerID)
 				return
 			}
@@ -271,7 +270,7 @@ func worker(ctx context.Context, workerID int, wg *sync.WaitGroup, jobs <-chan i
 			case <-ctx.Done():
 				logf("Worker %d: context cancelled before processing job %d.", workerID, jobID)
 				results <- TimingOutput{RequestID: jobID, Error: "Cancelled before start", EffectiveURL: urlStr}
-				return
+				return 
 			default:
 			}
 
@@ -302,34 +301,33 @@ func performRequest(ctx context.Context, requestID int, urlStr string, client *h
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
-	// Corrected error handling for request creation
-	if err != nil {
+	if err != nil { 
 		return TimingOutput{RequestID: requestID, Error: fmt.Sprintf("Failed to create request: %v", err), EffectiveURL: urlStr}
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-
-	opStart = time.Now()
-	resp, err := client.Do(req)
-	opEnd := time.Now()
+	
+	opStart = time.Now() 
+	resp, err := client.Do(req) 
+	opEnd := time.Now()  
 
 	output := TimingOutput{
 		RequestID:      requestID,
 		OverallTotalMs: float64(opEnd.Sub(opStart)) / float64(time.Millisecond),
-		EffectiveURL:   urlStr,
+		EffectiveURL:   urlStr, 
 	}
 
 	if resp != nil {
-		output.EffectiveURL = resp.Request.URL.String()
+		output.EffectiveURL = resp.Request.URL.String() 
 		output.HTTPStatus = resp.StatusCode
-		output.ContentLength = resp.ContentLength
+		output.ContentLength = resp.ContentLength 
 
 		if resp.Body != nil {
 			bodyBytes, readErr := io.ReadAll(resp.Body)
 			bodyReadDone = time.Now()
-			if readErr != nil && output.Error == "" {
+			if readErr != nil && output.Error == "" { 
 				output.Error = fmt.Sprintf("Error reading body: %v", readErr)
 			}
-			if output.ContentLength == -1 || (output.ContentLength == 0 && len(bodyBytes) > 0) {
+			if output.ContentLength == -1 || (output.ContentLength == 0 && len(bodyBytes) > 0) { 
 				output.ContentLength = int64(len(bodyBytes))
 			}
 			resp.Body.Close()
@@ -341,19 +339,17 @@ func performRequest(ctx context.Context, requestID int, urlStr string, client *h
 			}
 		}
 	}
-
-	// Corrected and clarified error assignment logic
-	if err != nil { // This 'err' is from client.Do(req)
-		// Prioritize context cancellation error message if present
+	
+	if err != nil { 
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			output.Error = fmt.Sprintf("Request context error: %v (original client.Do error: %v)", ctxErr, err)
-		} else if output.Error == "" { // If no body read error or other error already set
+		    output.Error = fmt.Sprintf("Request context error: %v (original client.Do error: %v)", ctxErr, err)
+		} else if output.Error == "" { 
 			output.Error = fmt.Sprintf("Request failed: %v", err)
-		} else { // An error (e.g. body read) was already set, append client.Do error if different
+		} else { 
 			output.Error = fmt.Sprintf("%s; client.Do error: %v", output.Error, err)
 		}
 	}
-
+	
 	if !dnsStart.IsZero() && !dnsDone.IsZero() {
 		output.DNSLookupDurationMs = float64(dnsDone.Sub(dnsStart)) / float64(time.Millisecond)
 	}
@@ -366,7 +362,7 @@ func performRequest(ctx context.Context, requestID int, urlStr string, client *h
 	if !wroteRequest.IsZero() && !firstByte.IsZero() {
 		output.ServerProcessingMs = float64(firstByte.Sub(wroteRequest)) / float64(time.Millisecond)
 	}
-	if !firstByte.IsZero() && !bodyReadDone.IsZero() && firstByte.Before(bodyReadDone) && resp != nil && resp.Body != nil {
+	if !firstByte.IsZero() && !bodyReadDone.IsZero() && firstByte.Before(bodyReadDone) && resp != nil && resp.Body != nil { 
 		output.ContentTransferMs = float64(bodyReadDone.Sub(firstByte)) / float64(time.Millisecond)
 	}
 
@@ -392,8 +388,8 @@ func printSummary(stats []requestStat) {
 		} else {
 			successfulRequests = append(successfulRequests, s)
 		}
-		if s.HTTPStatus != 0 || s.Error {
-			httpCodeCounts[s.HTTPStatus]++
+		if s.HTTPStatus != 0 || s.Error { 
+		    httpCodeCounts[s.HTTPStatus]++ 
 		}
 	}
 	logToStderr("Successful Requests: %d", len(successfulRequests))
@@ -406,16 +402,37 @@ func printSummary(stats []requestStat) {
 			sumTimeTotal += s.OverallTotalMs
 			allTimes[i] = s.OverallTotalMs
 		}
-		sort.Float64s(allTimes)
+		sort.Float64s(allTimes) 
 
 		minTimeTotal := allTimes[0]
 		maxTimeTotal := allTimes[len(allTimes)-1]
 		avgTimeTotal := sumTimeTotal / float64(len(successfulRequests))
-
+		
 		logToStderr("Overall Total Time (ms) for successful requests:")
 		logToStderr("  Min: %.3f", minTimeTotal)
 		logToStderr("  Max: %.3f", maxTimeTotal)
 		logToStderr("  Avg: %.3f", avgTimeTotal)
+
+		// Calculate and print Percentiles
+		n := len(allTimes)
+		if n > 0 {
+			// Helper to calculate percentile index safely
+			percentileIdx := func(p float64) int {
+				if n == 0 { return 0 } // Should not happen due to outer if n > 0
+				idx := int(math.Floor(p * float64(n-1)))
+				if idx < 0 { return 0 }
+				if idx >= n { return n - 1 }
+				return idx
+			}
+			
+			logToStderr("  p50: %.3f", allTimes[percentileIdx(0.50)])
+			logToStderr("  p75: %.3f", allTimes[percentileIdx(0.75)])
+			logToStderr("  p90: %.3f", allTimes[percentileIdx(0.90)])
+			logToStderr("  p99: %.3f", allTimes[percentileIdx(0.99)])
+			logToStderr("  p99.9: %.3f", allTimes[percentileIdx(0.999)])
+			logToStderr("  p99.99: %.3f", allTimes[percentileIdx(0.9999)])
+			logToStderr("  p99.999: %.3f", allTimes[percentileIdx(0.99999)])
+		}
 	}
 
 	if len(httpCodeCounts) > 0 {
@@ -424,10 +441,11 @@ func printSummary(stats []requestStat) {
 		for code := range httpCodeCounts {
 			codes = append(codes, code)
 		}
-		sort.Ints(codes)
+		sort.Ints(codes) 
 		for _, code := range codes {
 			logToStderr("  %d: %d", code, httpCodeCounts[code])
 		}
 	}
 	logToStderr("-----------------------")
 }
+
