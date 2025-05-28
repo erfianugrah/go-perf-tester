@@ -164,5 +164,5 @@ Feel free to fork the repository, make improvements, and submit pull requests. F
 
 ## License
 
-This project can be considered under the MIT License (or choose your preferred open-source license).
+This project can be considered under the (MIT License)[./LICENSE].
 
