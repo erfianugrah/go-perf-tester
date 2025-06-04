@@ -64,6 +64,7 @@ var (
 	noSummaryFlag          = flag.Bool("no-summary", false, "Disable summary report on exit")
 	urlListFileFlag        = flag.String("L", "", "File to read URLs from (one URL per line). Use '-' for stdin. Overrides positional URL arguments.")
 	capturedHeadersStrFlag = flag.String("H", "", "Comma-separated list of response headers to capture (e.g., 'X-Cache,Content-Type,KV-Status')")
+	showGraphsFlag         = flag.Bool("graphs", true, "Show ASCII graphs in summary output")
 )
 
 // logf prints to stderr if not in quiet mode.
@@ -491,14 +492,234 @@ func performRequest(ctx context.Context, requestID int, targetURLStr string, cli
 	return output
 }
 
+// generateHistogram creates an ASCII histogram for the given data
+func generateHistogram(data []float64, buckets int, width int) []string {
+	if len(data) == 0 || buckets <= 0 {
+		return []string{}
+	}
+
+	min := data[0]
+	max := data[len(data)-1]
+	
+	// Use more buckets for better resolution
+	if buckets < 20 {
+		buckets = 20
+	}
+	
+	// Create bucket ranges
+	bucketSize := (max - min) / float64(buckets)
+	if bucketSize == 0 {
+		bucketSize = 1
+	}
+	
+	// Count items in each bucket
+	bucketCounts := make([]int, buckets)
+	maxCount := 0
+	totalCount := len(data)
+	
+	for _, val := range data {
+		bucketIdx := int((val - min) / bucketSize)
+		if bucketIdx >= buckets {
+			bucketIdx = buckets - 1
+		}
+		bucketCounts[bucketIdx]++
+		if bucketCounts[bucketIdx] > maxCount {
+			maxCount = bucketCounts[bucketIdx]
+		}
+	}
+	
+	// Generate histogram lines
+	lines := []string{}
+	lines = append(lines, "\nLatency Distribution:")
+	lines = append(lines, "")
+	
+	// Create the histogram with horizontal bars
+	for i := 0; i < buckets; i++ {
+		bucketStart := min + float64(i)*bucketSize
+		
+		// Calculate bar length
+		barLength := 0
+		if maxCount > 0 {
+			barLength = int(float64(bucketCounts[i]) * float64(width) / float64(maxCount))
+		}
+		
+		// Calculate percentage
+		percentage := float64(bucketCounts[i]) * 100.0 / float64(totalCount)
+		
+		// Format the bar with fixed width
+		bar := strings.Repeat("▓", barLength)
+		if barLength == 0 && bucketCounts[i] > 0 {
+			bar = "▏"
+		}
+		// Pad bar to fixed width
+		bar = fmt.Sprintf("%-*s", width, bar)
+		
+		line := fmt.Sprintf("%7.1f ms | %s %6d  %5.1f pct", 
+			bucketStart + bucketSize/2, bar, bucketCounts[i], percentage)
+		lines = append(lines, line)
+	}
+	
+	return lines
+}
+
+// generateVerticalHistogram creates a vertical ASCII histogram (bell curve style)
+func generateVerticalHistogram(data []float64) []string {
+	if len(data) == 0 {
+		return []string{}
+	}
+	
+	lines := []string{}
+	lines = append(lines, "\nResponse Time Distribution (vertical):")
+	lines = append(lines, "")
+	
+	min := data[0]
+	max := data[len(data)-1]
+	
+	// Use fixed number of buckets for width
+	numBuckets := 50
+	if max-min < 50 {
+		numBuckets = int(max - min)
+		if numBuckets < 10 {
+			numBuckets = 10
+		}
+	}
+	
+	bucketSize := (max - min) / float64(numBuckets)
+	if bucketSize == 0 {
+		bucketSize = 1
+	}
+	
+	// Count items in each bucket
+	bucketCounts := make([]int, numBuckets)
+	maxCount := 0
+	
+	for _, val := range data {
+		bucketIdx := int((val - min) / bucketSize)
+		if bucketIdx >= numBuckets {
+			bucketIdx = numBuckets - 1
+		}
+		bucketCounts[bucketIdx]++
+		if bucketCounts[bucketIdx] > maxCount {
+			maxCount = bucketCounts[bucketIdx]
+		}
+	}
+	
+	// Height of the graph
+	height := 20
+	
+	// Draw the graph from top to bottom
+	for row := height; row > 0; row-- {
+		line := ""
+		threshold := float64(row) * float64(maxCount) / float64(height)
+		
+		for i := 0; i < numBuckets; i++ {
+			if float64(bucketCounts[i]) >= threshold {
+				line += "█"
+			} else {
+				line += " "
+			}
+		}
+		
+		// Add scale on the left
+		if row == height {
+			lines = append(lines, fmt.Sprintf("%6d |%s", maxCount, line))
+		} else if row == height/2 {
+			lines = append(lines, fmt.Sprintf("%6d |%s", maxCount/2, line))
+		} else if row == 1 {
+			lines = append(lines, fmt.Sprintf("%6d |%s", 0, line))
+		} else {
+			lines = append(lines, fmt.Sprintf("       |%s", line))
+		}
+	}
+	
+	// Add bottom axis
+	lines = append(lines, "       +"+strings.Repeat("-", numBuckets))
+	
+	// Add time labels
+	labelLine := "       "
+	labelLine += fmt.Sprintf(" %-6.0fms", min)
+	spacing := (numBuckets - 16) / 2
+	if spacing > 0 {
+		labelLine += strings.Repeat(" ", spacing)
+	}
+	labelLine += fmt.Sprintf("%-6.0fms", (min+max)/2)
+	if spacing > 0 {
+		labelLine += strings.Repeat(" ", spacing)
+	}
+	labelLine += fmt.Sprintf("%6.0fms", max)
+	lines = append(lines, labelLine)
+	
+	return lines
+}
+
+// generatePercentileGraph creates an ASCII graph showing percentile distribution
+func generatePercentileGraph(allTimes []float64) []string {
+	if len(allTimes) == 0 {
+		return []string{}
+	}
+	
+	lines := []string{}
+	lines = append(lines, "\nPercentile Distribution Graph:")
+	lines = append(lines, "")
+	
+	percentiles := []struct {
+		label string
+		value float64
+	}{
+		{"p50", 0.50},
+		{"p75", 0.75},
+		{"p90", 0.90},
+		{"p95", 0.95},
+		{"p99", 0.99},
+		{"p99.9", 0.999},
+		{"p99.99", 0.9999},
+		{"p99.999", 0.99999},
+	}
+	
+	n := len(allTimes)
+	maxVal := allTimes[n-1]
+	graphWidth := 40
+	
+	for _, p := range percentiles {
+		idx := int(math.Floor(p.value * float64(n-1)))
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= n {
+			idx = n - 1
+		}
+		
+		val := allTimes[idx]
+		barLength := int(val * float64(graphWidth) / maxVal)
+		if barLength == 0 && val > 0 {
+			barLength = 1
+		}
+		
+		bar := strings.Repeat("▓", barLength)
+		// Pad bar to fixed width for alignment
+		bar = fmt.Sprintf("%-*s", graphWidth, bar)
+		
+		line := fmt.Sprintf("%-8s %8.3f ms | %s", p.label+":", val, bar)
+		lines = append(lines, line)
+	}
+	
+	return lines
+}
+
 func printSummary(stats []requestStat) {
 	if len(stats) == 0 {
 		logToStderr("No requests processed for summary.")
 		return
 	}
 
-	logToStderr("\n--- Request Summary ---")
-	logToStderr("Total Requests Accounted for in Summary: %d", len(stats))
+	logToStderr("\n" + strings.Repeat("=", 60))
+	logToStderr("                    PERFORMANCE TEST RESULTS")
+	logToStderr(strings.Repeat("=", 60))
+	
+	// Overall statistics
+	logToStderr("\nOVERALL STATISTICS")
+	logToStderr(strings.Repeat("-", 60))
+	logToStderr("Total Requests: %d", len(stats))
 
 	var successfulRequests []requestStat
 	failedRequestCount := 0
@@ -514,8 +735,10 @@ func printSummary(stats []requestStat) {
 			httpCodeCounts[s.HTTPStatus]++
 		}
 	}
-	logToStderr("Successful Requests (no error flag): %d", len(successfulRequests))
-	logToStderr("Failed Requests (error flag set): %d", failedRequestCount)
+	
+	successRate := float64(len(successfulRequests)) * 100.0 / float64(len(stats))
+	logToStderr("Successful: %d (%.1f pct)", len(successfulRequests), successRate)
+	logToStderr("Failed: %d (%.1f pct)", failedRequestCount, 100.0-successRate)
 
 	if len(successfulRequests) > 0 {
 		var sumTimeTotal float64
@@ -530,10 +753,16 @@ func printSummary(stats []requestStat) {
 		maxTimeTotal := allTimes[len(allTimes)-1]
 		avgTimeTotal := sumTimeTotal / float64(len(successfulRequests))
 
-		logToStderr("Overall Total Time (ms) for successful requests:")
-		logToStderr("  Min: %.3f", minTimeTotal)
-		logToStderr("  Max: %.3f", maxTimeTotal)
-		logToStderr("  Avg: %.3f", avgTimeTotal)
+		// Response time statistics
+		logToStderr("\nRESPONSE TIME STATISTICS (successful requests)")
+		logToStderr(strings.Repeat("-", 60))
+		logToStderr("Min:     %8.3f ms", minTimeTotal)
+		logToStderr("Max:     %8.3f ms", maxTimeTotal)
+		logToStderr("Average: %8.3f ms", avgTimeTotal)
+		
+		// Percentiles
+		logToStderr("\nPERCENTILES")
+		logToStderr(strings.Repeat("-", 60))
 
 		n := len(allTimes)
 		if n > 0 {
@@ -551,26 +780,52 @@ func printSummary(stats []requestStat) {
 				return idx
 			}
 
-			logToStderr("  p50 (Median): %.3f", allTimes[percentileIdx(0.50)])
-			logToStderr("  p75: %.3f", allTimes[percentileIdx(0.75)])
-			logToStderr("  p90: %.3f", allTimes[percentileIdx(0.90)])
-			logToStderr("  p99: %.3f", allTimes[percentileIdx(0.99)])
-			logToStderr("  p99.9: %.3f", allTimes[percentileIdx(0.999)])
-			logToStderr("  p99.99: %.3f", allTimes[percentileIdx(0.9999)])
-			logToStderr("  p99.999: %.3f", allTimes[percentileIdx(0.99999)])
+			logToStderr("p50  (Median): %8.3f ms", allTimes[percentileIdx(0.50)])
+			logToStderr("p75:           %8.3f ms", allTimes[percentileIdx(0.75)])
+			logToStderr("p90:           %8.3f ms", allTimes[percentileIdx(0.90)])
+			logToStderr("p95:           %8.3f ms", allTimes[percentileIdx(0.95)])
+			logToStderr("p99:           %8.3f ms", allTimes[percentileIdx(0.99)])
+			logToStderr("p99.9:         %8.3f ms", allTimes[percentileIdx(0.999)])
+			logToStderr("p99.99:        %8.3f ms", allTimes[percentileIdx(0.9999)])
+			logToStderr("p99.999:       %8.3f ms", allTimes[percentileIdx(0.99999)])
+		}
+		
+		// Generate and print graphs if enabled
+		if *showGraphsFlag {
+			// Generate and print vertical histogram (bell curve style)
+			verticalHistLines := generateVerticalHistogram(allTimes)
+			for _, line := range verticalHistLines {
+				logToStderr(line)
+			}
+			
+			// Generate and print horizontal histogram
+			histogramLines := generateHistogram(allTimes, 20, 40)
+			for _, line := range histogramLines {
+				logToStderr(line)
+			}
+			
+			// Generate and print percentile graph
+			percentileLines := generatePercentileGraph(allTimes)
+			for _, line := range percentileLines {
+				logToStderr(line)
+			}
 		}
 	}
 
+	// HTTP Status codes
 	if len(httpCodeCounts) > 0 {
-		logToStderr("HTTP Status Codes (includes errors where code might be 0):")
+		logToStderr("\nHTTP STATUS CODES")
+		logToStderr(strings.Repeat("-", 60))
 		codes := make([]int, 0, len(httpCodeCounts))
 		for code := range httpCodeCounts {
 			codes = append(codes, code)
 		}
 		sort.Ints(codes)
 		for _, code := range codes {
-			logToStderr("  %d: %d", code, httpCodeCounts[code])
+			percentage := float64(httpCodeCounts[code]) * 100.0 / float64(len(stats))
+			logToStderr("  %3d: %6d requests (%.1f pct)", code, httpCodeCounts[code], percentage)
 		}
 	}
-	logToStderr("-----------------------")
+	
+	logToStderr("\n" + strings.Repeat("=", 60))
 }
