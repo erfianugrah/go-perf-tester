@@ -64,6 +64,8 @@ var (
 	noSummaryFlag          = flag.Bool("no-summary", false, "Disable summary report on exit")
 	urlListFileFlag        = flag.String("L", "", "File to read URLs from (one URL per line). Use '-' for stdin. Overrides positional URL arguments.")
 	capturedHeadersStrFlag = flag.String("H", "", "Comma-separated list of response headers to capture (e.g., 'X-Cache,Content-Type,KV-Status')")
+	requestHeadersFlag     = flag.String("header", "", "Comma-separated list of request headers to send (e.g., 'Authorization: Bearer token,User-Agent: MyBot/1.0')")
+	rangeFlag              = flag.String("range", "", "Byte range to request (e.g., '0-1023' for first 1KB, '1024-2047' for second KB)")
 	showGraphsFlag         = flag.Bool("graphs", true, "Show ASCII graphs in summary output")
 )
 
@@ -147,6 +149,59 @@ func readURLs() []string {
 	return validURLs
 }
 
+// parseRequestHeaders parses comma-separated request headers from the command line
+func parseRequestHeaders() (map[string]string, error) {
+	headers := make(map[string]string)
+	
+	if *requestHeadersFlag == "" {
+		return headers, nil
+	}
+	
+	headerPairs := strings.Split(*requestHeadersFlag, ",")
+	for _, pair := range headerPairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		
+		colonIdx := strings.Index(pair, ":")
+		if colonIdx == -1 {
+			return nil, fmt.Errorf("invalid header format '%s' - expected 'Name: Value'", pair)
+		}
+		
+		name := strings.TrimSpace(pair[:colonIdx])
+		value := strings.TrimSpace(pair[colonIdx+1:])
+		
+		if name == "" {
+			return nil, fmt.Errorf("empty header name in '%s'", pair)
+		}
+		
+		headers[name] = value
+	}
+	
+	return headers, nil
+}
+
+// parseRangeHeader validates and returns the range header value
+func parseRangeHeader() (string, error) {
+	if *rangeFlag == "" {
+		return "", nil
+	}
+	
+	// Basic validation for byte range format (e.g., "0-1023", "1024-", "-1024")
+	rangeValue := strings.TrimSpace(*rangeFlag)
+	if rangeValue == "" {
+		return "", nil
+	}
+	
+	// Check if it matches basic range patterns
+	if !strings.Contains(rangeValue, "-") {
+		return "", fmt.Errorf("invalid range format '%s' - expected format like '0-1023', '1024-', or '-1024'", rangeValue)
+	}
+	
+	return "bytes=" + rangeValue, nil
+}
+
 func main() {
 	log.SetOutput(os.Stderr)
 	log.SetFlags(0)
@@ -165,9 +220,24 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  %s https://www.google.com\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -n 10 -c 5 https://api.example.com/ping https://data.example.com/status > results.json\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -L urls.txt -n 3 -H \"X-Cache,Server\" > results.json\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -header \"Authorization: Bearer token,User-Agent: MyBot/1.0\" https://api.example.com\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -range \"0-1023\" https://example.com/largefile.zip\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -header \"Accept: application/json\" -range \"1024-2047\" https://api.example.com/data\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  cat list_of_urls.txt | %s -L - -n 5 -q --no-summary\n", os.Args[0])
 	}
 	flag.Parse()
+
+	// Parse request headers
+	requestHeaders, err := parseRequestHeaders()
+	if err != nil {
+		fatalf("Error parsing request headers: %v", err)
+	}
+	
+	// Parse range header
+	rangeHeader, err := parseRangeHeader()
+	if err != nil {
+		fatalf("Error parsing range header: %v", err)
+	}
 
 	targetURLs := readURLs()
 	numURLs := len(targetURLs)
@@ -256,7 +326,7 @@ func main() {
 
 	for i := 0; i < numWorkersToLaunch; i++ {
 		wg.Add(1)
-		go worker(workerCtx, i, &wg, jobs, resultsChan, sharedClient)
+		go worker(workerCtx, i, &wg, jobs, resultsChan, sharedClient, requestHeaders, rangeHeader)
 	}
 
 	var collectorWg sync.WaitGroup
@@ -363,7 +433,7 @@ endJobLoop:
 	}
 }
 
-func worker(ctx context.Context, workerID int, wg *sync.WaitGroup, jobs <-chan Job, results chan<- TimingOutput, client *http.Client) {
+func worker(ctx context.Context, workerID int, wg *sync.WaitGroup, jobs <-chan Job, results chan<- TimingOutput, client *http.Client, requestHeaders map[string]string, rangeHeader string) {
 	defer wg.Done()
 	logf("Worker %d started", workerID)
 	for {
@@ -382,7 +452,7 @@ func worker(ctx context.Context, workerID int, wg *sync.WaitGroup, jobs <-chan J
 			}
 
 			logf("Worker %d: processing request %d for %s", workerID, job.ID, job.TargetURL)
-			timingResult := performRequest(ctx, job.ID, job.TargetURL, client)
+			timingResult := performRequest(ctx, job.ID, job.TargetURL, client, requestHeaders, rangeHeader)
 			results <- timingResult
 
 		case <-ctx.Done():
@@ -392,7 +462,7 @@ func worker(ctx context.Context, workerID int, wg *sync.WaitGroup, jobs <-chan J
 	}
 }
 
-func performRequest(ctx context.Context, requestID int, targetURLStr string, client *http.Client) TimingOutput {
+func performRequest(ctx context.Context, requestID int, targetURLStr string, client *http.Client, requestHeaders map[string]string, rangeHeader string) TimingOutput {
 	var opStart, dnsStart, dnsDone, connectStart, connectDone,
 		tlsStart, tlsDone, wroteRequest, firstByte, bodyReadDone time.Time
 
@@ -411,6 +481,17 @@ func performRequest(ctx context.Context, requestID int, targetURLStr string, cli
 	if err != nil {
 		return TimingOutput{RequestID: requestID, Error: fmt.Sprintf("Failed to create request: %v", err), TargetURL: targetURLStr, EffectiveURL: targetURLStr}
 	}
+	
+	// Add custom request headers
+	for name, value := range requestHeaders {
+		req.Header.Set(name, value)
+	}
+	
+	// Add range header if specified
+	if rangeHeader != "" {
+		req.Header.Set("Range", rangeHeader)
+	}
+	
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 
 	opStart = time.Now()
